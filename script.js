@@ -3,8 +3,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // --- Configuration ---
 const CONFIG = {
-    resolution: 16, // Base voxel grid (higher clarity)
-    maxTextureRes: 16,
+    resolution: 192, // Base voxel grid (higher clarity)
+    maxTextureRes: 256,
     graphSamples: 400
 };
 

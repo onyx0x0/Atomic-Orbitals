@@ -1,4 +1,4 @@
-﻿import * as THREE from 'three';
+import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // --- Configuration ---
@@ -16,7 +16,8 @@ const state = {
     exposure: 15.0,
     threshold: 0.0,
     theme: 0,
-    slice: 1.0 // 1.0 = Full view, 0.0 = completely cut
+    slice: 1.0, // 1.0 = Full view, 0.0 = completely cut
+    chargeFlash: 0
 };
 
 // --- DOM References ---
@@ -52,7 +53,8 @@ const dom = {
     modalClose: document.getElementById('modal-close'),
     themeSelect: document.getElementById('theme-select'),
     themeToggle: document.getElementById('theme-toggle'),
-    themeMenu: document.getElementById('theme-menu')
+    themeMenu: document.getElementById('theme-menu'),
+    chargeToggle: document.getElementById('charge-toggle')
 };
 
 // --- Three.js Setup ---
@@ -65,7 +67,7 @@ camera.position.set(1.2, 0.5, 0);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ 
-    antialias: true, 
+    antialias: false, // disable AA for speed; visuals dominated by volume blur
     alpha: true,
     powerPreference: "high-performance"
 });
@@ -77,11 +79,17 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.enablePan = false;
 controls.minDistance = 0.25; // Allows zooming INSIDE the orbital
-controls.maxDistance = 20;
+controls.maxDistance = 2;
 controls.zoomSpeed = 1.2;
-controls.enableZoom = false; // we handle zoom smoothing manually
+controls.enableZoom = false; // custom smoothing below
+
 let zoomTargetDistance = camera.position.distanceTo(controls.target);
 const zoomVec = new THREE.Vector3();
+const clock = new THREE.Clock();
+
+function renderScene() {
+    renderer.render(scene, camera);
+}
 
 renderer.domElement.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -121,6 +129,8 @@ const fragmentShader = `
     uniform float uSlice;
     uniform int uSteps;
     uniform int uTheme;
+    uniform float uChargeFlash;
+    uniform float uTime;
 
     // Ray-Box Intersection
     vec2 hitBox(vec3 orig, vec3 dir) {
@@ -184,11 +194,21 @@ const fragmentShader = `
             
             // Only sample if behind the cut plane
             if (p.z < cutZ) {
-                float d = texture(uTexture, p + 0.5).r;
+                float d = texture(uTexture, p + 0.5).r; // signed amplitude (normalized)
+                float dens = d * d; // probability density (relative)
                 
-                if (d > uThreshold) {
-                    float v = clamp(d * uExposure, 0.0, 1.0);
+                if (dens > uThreshold) {
+                    float v = clamp(dens * uExposure, 0.0, 1.0);
                     vec3 rgb = colormap(v, uTheme);
+                    if (uChargeFlash > 0.5) {
+                        float phase = 0.5 + 0.5 * sin(uTime * 3.0);
+                        vec3 orangeTint = vec3(1.0, 0.45, 0.05); // fire orange
+                        vec3 purpleTint = vec3(0.45, 0.15, 0.7); // deep purple
+                        // Swap which lobe is orange vs purple over the phase
+                        vec3 posColor = mix(orangeTint, purpleTint, phase);
+                        vec3 negColor = mix(purpleTint, orangeTint, phase);
+                        rgb = (d >= 0.0) ? mix(rgb, posColor, 0.65) : mix(rgb, negColor, 0.65);
+                    }
                     float alpha = v * 0.5; // Gas-like accumulation
                     
                     vec4 src = vec4(rgb, alpha);
@@ -215,7 +235,9 @@ const material = new THREE.ShaderMaterial({
         uExposure: { value: state.exposure },
         uSteps: { value: 192 },
         uTheme: { value: state.theme },
-        uSlice: { value: state.slice }
+        uSlice: { value: state.slice },
+        uChargeFlash: { value: state.chargeFlash },
+        uTime: { value: 0 }
     },
     vertexShader: vertexShader,
     fragmentShader: fragmentShader,
@@ -230,9 +252,9 @@ scene.add(mesh);
 
 // --- Graph + helper state ---
 const GRAPH_COLORS = {
-    radial: '#4dd0e1',
-    probability: '#ffb84d',
-    cumulative: '#7cff8c'
+    radial: '#ff7b00',
+    probability: '#c300ff',
+    cumulative: '#ff0077'
 };
 const GRAPH_PADDING = { left: 38, right: 14, top: 12, bottom: 24 };
 let graphData = { r: [], radial: [], probability: [], cumulative: [], rMax: 1 };
@@ -369,8 +391,7 @@ function getOrbitalValue(n, l, m, x, y, z) {
 
     const R = radialPart(n, l, r);
     const Y = getAngularValue(l, m, theta, phi);
-    const psi = R * Y;
-    return psi * psi;
+    return R * Y; // signed amplitude
 }
 
 // --- Radial data + graphs ---
@@ -693,7 +714,8 @@ function updateTexture() {
 
                     const val = getOrbitalValue(state.n, state.l, state.m, fx, fy, fz);
                     data[idx] = val;
-                    if (val > maxVal) maxVal = val;
+                    const a = Math.abs(val);
+                    if (a > maxVal) maxVal = a;
                     idx++;
                 }
             }
@@ -712,11 +734,12 @@ function updateTexture() {
         texture.needsUpdate = true;
 
         material.uniforms.uTexture.value = texture;
-        material.uniforms.uSteps.value = Math.min(256, Math.max(160, Math.floor(size * 0.9)));
+        material.uniforms.uSteps.value = Math.min(256, Math.max(128, Math.floor(size * 0.9)));
 
         updateUI();
         refreshRadialGraphs();
         dom.loader.classList.remove('active');
+        renderScene();
     }, 20);
 }
 
@@ -729,6 +752,7 @@ function updateUI() {
     dom.orbitalName.innerText = formatOrbitalName(lLetter);
     if (dom.themeSelect) dom.themeSelect.value = `${state.theme}`;
     if (dom.themeToggle) dom.themeToggle.textContent = state.theme === 1 ? 'Magma Fire' : 'Default Glow';
+    if (dom.chargeToggle) dom.chargeToggle.textContent = state.chargeFlash ? 'Charge Flash: On' : 'Charge Flash: Off';
 }
 
 // --- Logic for Steppers ---
@@ -763,6 +787,15 @@ dom.sliceSlider.addEventListener('input', (e) => {
     state.slice = parseFloat(e.target.value);
     material.uniforms.uSlice.value = state.slice;
 });
+
+if (dom.chargeToggle) {
+    dom.chargeToggle.addEventListener('click', () => {
+        state.chargeFlash = state.chargeFlash ? 0 : 1;
+        material.uniforms.uChargeFlash.value = state.chargeFlash;
+        updateUI();
+        renderScene();
+    });
+}
 
 function applyTheme(val) {
     state.theme = val;
@@ -883,23 +916,26 @@ if (dom.modal) {
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderGraphs();
+    renderScene();
 });
 
-// --- Init & Loop ---
+// --- Init ---
 updateTexture();
 
 function animate() {
     requestAnimationFrame(animate);
     controls.update();
-    // Smooth zoom toward target distance
+
     const currentDist = camera.position.distanceTo(controls.target);
     const nextDist = THREE.MathUtils.lerp(currentDist, zoomTargetDistance, 0.18);
     zoomVec.subVectors(camera.position, controls.target).normalize().multiplyScalar(nextDist);
     camera.position.copy(controls.target).add(zoomVec);
     camera.lookAt(controls.target);
 
+    material.uniforms.uTime.value = clock.getElapsedTime();
     renderer.render(scene, camera);
 }
 animate();
